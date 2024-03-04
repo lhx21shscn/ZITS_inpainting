@@ -221,6 +221,8 @@ def get_inpainting_metrics(src, tgt, logger, fid_test=True):
         if img1 is None:
             print(p1, 'is bad image!')
         img2 = cv2.imread(p2)
+        # TODO 临时方法
+        img2 = cv2.resize(img2, (256, 256), interpolation=cv2.INTER_AREA)
         if img2 is None:
             print(p2, 'is bad image!')
 
