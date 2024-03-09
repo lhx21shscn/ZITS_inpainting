@@ -170,7 +170,9 @@ def _compute_statistics_of_path(path, model, batch_size, dims, cuda):
 
         imgs = []
         for fn in tqdm(files):
-            imgs.append(cv2.imread(str(fn)).astype(np.float32)[:, :, ::-1])
+            img = cv2.imread(str(fn)).astype(np.float32)[:, :, ::-1]
+            img = cv2.resize(img, (256, 256), cv2.INTER_AREA)
+            imgs.append(img)
         imgs = np.array(imgs)
 
         # Bring images to shape (B, 3, H, W)
