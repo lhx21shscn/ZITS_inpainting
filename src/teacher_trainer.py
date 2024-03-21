@@ -6,7 +6,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from datasets.dataset_teacher import *
-from src.models.FTR_model import *
+from src.models.Teacher_model import *
 from .inpainting_metrics import get_inpainting_metrics
 from .utils import Progbar, create_dir, stitch_images, SampleEdgeLineLogits
 
@@ -22,7 +22,7 @@ class LaMa_Teacher:
         kwargs = dict(config.training_model)
         kwargs.pop('kind')
 
-        self.inpaint_model = LaMaInpaintingTrainingModule(config, gpu=gpu, rank=rank, test=test, **kwargs).to(gpu)
+        self.inpaint_model = TeacherInpaintingTrainingModule(config, gpu=gpu, rank=rank, test=test, **kwargs).to(gpu)
 
         if config.min_sigma is None:
             min_sigma = 2.0
@@ -94,8 +94,9 @@ class LaMa_Teacher:
             for _, items in enumerate(train_loader):
                 self.inpaint_model.train()
 
-                items['image'] = items['image'].to(self.device)
-                items['mask'] = items['mask'].to(self.device)
+                for k in items:
+                    if type(items[k]) is torch.Tensor:
+                        items[k] = items[k].to(self.device)
 
                 # train
                 outputs, gen_loss, dis_loss, logs, batch = self.inpaint_model.process(items)
