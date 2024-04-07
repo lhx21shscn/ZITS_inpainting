@@ -80,9 +80,7 @@ if __name__ == "__main__":
     # create checkpoints path if does't exist
     os.makedirs(args.path, exist_ok=True)
 
-    # copy config template if does't exist
-    if not os.path.exists(config_path):
-        copyfile(args.config_file, config_path)  ## Training, always copy
+    copyfile(args.config_file, config_path)
 
     args.config_path = config_path
 
@@ -90,7 +88,7 @@ if __name__ == "__main__":
     if args.DDP:
         args.world_size = args.nodes * args.gpus
         os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '22323'
+        os.environ['MASTER_PORT'] = '12353'
     else:
         args.world_size = 1
 

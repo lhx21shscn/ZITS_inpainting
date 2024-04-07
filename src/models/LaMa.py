@@ -350,7 +350,7 @@ class NLayerDiscriminator(nn.Module):
 
 
 class Teacher(nn.Module):
-    def __init__(self, edge=True, line=True, seg=False, in_channels=4):
+    def __init__(self, edge=True, line=True, seg=False, in_channels=5):
         super().__init__()
 
         self.edge = edge
@@ -383,10 +383,13 @@ class Teacher(nn.Module):
         self.rgb_decoder = nn.Sequential(
             nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.BatchNorm2d(256),
+            nn.ReLU(True),
             nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.BatchNorm2d(128),
+            nn.ReLU(True),
             nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.BatchNorm2d(64),
+            nn.ReLU(True),
             nn.ReflectionPad2d(3),
             nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
             nn.Tanh()
@@ -395,26 +398,34 @@ class Teacher(nn.Module):
             self.edge_decoder = nn.Sequential(
                 nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
                 nn.BatchNorm2d(256),
+                nn.ReLU(True),
                 nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
                 nn.BatchNorm2d(128),
+                nn.ReLU(True),
                 nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
                 nn.BatchNorm2d(64),
+                nn.ReLU(True),
                 nn.ReflectionPad2d(3),
-                nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
+                nn.Conv2d(in_channels=64, out_channels=1, kernel_size=7, padding=0),
                 nn.Sigmoid()
             )
         if self.line:
             self.line_decoder = nn.Sequential(
                 nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
                 nn.BatchNorm2d(256),
+                nn.ReLU(True),
                 nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
                 nn.BatchNorm2d(128),
+                nn.ReLU(True),
                 nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
                 nn.BatchNorm2d(64),
+                nn.ReLU(True),
                 nn.ReflectionPad2d(3),
-                nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
+                nn.Conv2d(in_channels=64, out_channels=1, kernel_size=7, padding=0),
                 nn.Sigmoid()
             )
+        if self.seg:
+            pass
 
     def forward(self, x, rel_pos_emb=None, direct_emb=None, str_feats=None):
         x = self.pad1(x)
@@ -436,7 +447,7 @@ class Teacher(nn.Module):
 
         x = self.middle(x)
 
-        img = self.rgb_decoder(x)
+        img = self.rgb_decoder(x.to(torch.float32))
         img = (img + 1) / 2
         edge, line, seg = None, None, None
         if self.edge:

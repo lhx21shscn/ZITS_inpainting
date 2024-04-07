@@ -1,4 +1,7 @@
 import os
+import torch.distributed as dist
+from torch.nn import SyncBatchNorm as SynBN
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.losses.adversarial import NonSaturatingWithR1
 from src.losses.feature_matching import masked_l1_loss, feature_matching_loss
@@ -31,7 +34,7 @@ def add_prefix_to_keys(dct, prefix):
 class TeacherBaseInpaintingTrainingModule(nn.Module):
     def __init__(self, config, gpu, name, rank, *args, test=False, **kwargs):
         super().__init__(*args, **kwargs)
-        print('BaseInpaintingTrainingModule init called')
+        print('TeacherBaseInpaintingTrainingModule init called')
         self.global_rank = rank
         self.config = config
         self.iteration = 0
@@ -43,7 +46,8 @@ class TeacherBaseInpaintingTrainingModule(nn.Module):
         self.edge = config.Edge
         self.line = config.Line
         self.seg = config.Seg
-        self.generator = Teacher(config.Edge, config.Line, config.Seg).cuda(gpu)
+        self.generator = Teacher(config.Edge, config.Line, config.Seg, \
+                                 in_channels=config.generator["input_nc"]).cuda(gpu)
         self.best = None
 
         if not test:
@@ -69,6 +73,11 @@ class TeacherBaseInpaintingTrainingModule(nn.Module):
             self.scaler = torch.cuda.amp.GradScaler()
 
         self.load()
+        if self.config.DDP:
+            self.generator = self.generator if not config.DDP else SynBN.convert_sync_batchnorm(self.generator)  # BN层同步
+            self.generator = DDP(self.generator)
+            self.discriminator = self.discriminator if not config.DDP else SynBN.convert_sync_batchnorm(self.discriminator)  # BN层同步
+            self.discriminator = DDP(self.discriminator)
 
     def load(self):
         if self.test:
@@ -152,16 +161,16 @@ class TeacherInpaintingTrainingModule(TeacherBaseInpaintingTrainingModule):
         masked_img = img * (1 - mask)
         input_data = [masked_img, mask]
         if self.edge:
-            edge = batch['edge']
-            input_data.append(edge)
+            masked_edge = batch['edge'] * (1 - mask)
+            input_data.append(masked_edge)
         if self.line:
-            line = batch['line']
-            input_data.append(line)
+            masked_line = batch['line'] * (1 - mask)
+            input_data.append(masked_line)
         if self.seg:
-            seg = batch['seg']
-            input_data.append(seg)
+            masked_seg = batch['seg'] * (1 - mask)
+            input_data.append(masked_seg)
         input_data = torch.cat(input_data, dim=1)
-        predicted_image, predicted_edge, predicted_line, predicted_seg, predicted_feat  = self.generator(input_data)
+        predicted_image, predicted_edge, predicted_line, predicted_seg, predicted_feat  = self.generator(input_data.to(torch.float32))
         batch['predicted_image'] = predicted_image
         batch['inpainted_image'] = mask * batch['predicted_image'] + (1 - mask) * batch['image']
 
@@ -253,18 +262,21 @@ class TeacherInpaintingTrainingModule(TeacherBaseInpaintingTrainingModule):
             gen_metric['gen_fm'] = fm_value.item()
 
         if self.loss_resnet_pl is not None:
-            with torch.cuda.amp.autocast():
-                resnet_pl_value = self.loss_resnet_pl(predicted_img, img)
+            resnet_pl_value = self.loss_resnet_pl(predicted_img, img)
             gen_loss = gen_loss + resnet_pl_value
             gen_metric['gen_resnet_pl'] = resnet_pl_value.item()
 
         if self.edge:
-            edge_loss = F.binary_cross_entropy(batch["predicted_edge"].permute(0, 2, 3, 1).view(-1, 1), batch["edge"].permute(0, 2, 3, 1).view(-1, 1))
+            edge_loss = F.binary_cross_entropy(batch["predicted_edge"].permute(0, 2, 3, 1).contiguous().view(-1, 1), \
+                                               batch["edge"].permute(0, 2, 3, 1).contiguous().view(-1, 1)) * self.config.losses['edge']['weight']
             gen_loss = gen_loss + edge_loss
+            gen_metric["edge"] = edge_loss.item()
 
         if self.line:
-            line_loss = F.binary_cross_entropy(batch["predicted_line"].permute(0, 2, 3, 1).view(-1, 1), batch["line"].permute(0, 2, 3, 1).view(-1, 1))
+            line_loss = F.binary_cross_entropy(batch["predicted_line"].permute(0, 2, 3, 1).contiguous().view(-1, 1), \
+                                               batch["line"].permute(0, 2, 3, 1).contiguous().view(-1, 1)) * self.config.losses['line']['weight']
             gen_loss = gen_loss + line_loss
+            gen_metric["line"] = line_loss.item()
 
         # TODO delete
         if self.seg:

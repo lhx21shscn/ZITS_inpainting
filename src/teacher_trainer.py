@@ -42,14 +42,13 @@ class LaMa_Teacher:
             self.train_sampler = DistributedSampler(self.train_dataset, num_replicas=config.world_size,
                                                     rank=self.global_rank, shuffle=True)
         self.val_dataset = AuxDataset(config.VAL_FLIST, mask_path=None,
-                                            batch_size=config.BATCH_SIZE, augment=False, training=False,
-                                            test_mask_path=config.TEST_MASK_FLIST,
-                                            eval_line_path=config.eval_line_path,
-                                            add_pos=config.use_MPE, input_size=config.INPUT_SIZE,
-                                            min_sigma=min_sigma, max_sigma=max_sigma)
+                                      batch_size=config.BATCH_SIZE, augment=False, training=False,
+                                      test_mask_path=config.TEST_MASK_FLIST,
+                                      eval_line_path=config.eval_line_path,
+                                      add_pos=config.use_MPE, input_size=config.INPUT_SIZE,
+                                      min_sigma=min_sigma, max_sigma=max_sigma)
         self.sample_iterator = self.val_dataset.create_iterator(config.SAMPLE_SIZE)
-        self.val_path = os.path.join(config.PATH, 'validation')
-        create_dir(self.val_path)
+
         self.samples_path = os.path.join(config.PATH, 'samples')
         self.results_path = os.path.join(config.PATH, 'results')
         self.val_path = os.path.join(config.PATH, 'validation')
@@ -181,8 +180,9 @@ class LaMa_Teacher:
         with torch.no_grad():
             for items in tqdm(val_loader):
                 iteration += 1
-                items['image'] = items['image'].to(self.device)
-                items['mask'] = items['mask'].to(self.device)
+                for k in items:
+                    if type(items[k]) is torch.Tensor:
+                        items[k] = items[k].to(self.device)
                 b, _, _, _ = items['image'].size()
 
                 # inpaint model
@@ -214,12 +214,18 @@ class LaMa_Teacher:
         self.inpaint_model.eval()
         with torch.no_grad():
             items = next(self.sample_iterator)
-            items['image'] = items['image'].to(self.device)
-            items['mask'] = items['mask'].to(self.device)
-
+            for k in items:
+                if type(items[k]) is torch.Tensor:
+                    items[k] = items[k].to(self.device)
             # inpaint model
             iteration = self.inpaint_model.iteration
             inputs = (items['image'] * (1 - items['mask']))
+            if self.config.Edge:
+                inputs_edge = items['edge'] * (1 - items['mask'])
+            if self.config.Line:
+                inputs_line = items['line'] * (1 - items['mask'])
+            if self.config.Seg:
+                inputs_seg = items['seg'] * (1 - items['mask'])
             items = self.inpaint_model(items)
             outputs_merged = (items['predicted_image'] * items['mask']) + (items['image'] * (1 - items['mask']))
 
@@ -229,14 +235,27 @@ class LaMa_Teacher:
         image_per_row = 2
         if self.config.SAMPLE_SIZE <= 6:
             image_per_row = 1
-        images = stitch_images(
-            self.postprocess(items['image'].cpu()),
-            self.postprocess(inputs.cpu()),
-            self.postprocess(items['mask'].cpu()),
-            self.postprocess(items['predicted_image'].cpu()),
-            self.postprocess(outputs_merged.cpu()),
-            img_per_row=image_per_row
-        )
+
+        if self.config.Line:
+            images = stitch_images(
+                self.postprocess(items['image'].cpu()),
+                self.postprocess(inputs.cpu()),
+                self.postprocess(inputs_line.cpu()),
+                self.postprocess(items['mask'].cpu()),
+                self.postprocess(items['predicted_image'].cpu()),
+                self.postprocess(items['predicted_line'].cpu()),
+                self.postprocess(outputs_merged.cpu()),
+                img_per_row=image_per_row
+            )
+        else:
+            images = stitch_images(
+                self.postprocess(items['image'].cpu()),
+                self.postprocess(inputs.cpu()),
+                self.postprocess(items['mask'].cpu()),
+                self.postprocess(items['predicted_image'].cpu()),
+                self.postprocess(outputs_merged.cpu()),
+                img_per_row=image_per_row
+            )
 
         path = os.path.join(self.samples_path, self.model_name)
         name = os.path.join(path, str(iteration).zfill(5) + ".png")

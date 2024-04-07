@@ -12,6 +12,7 @@ from skimage.color import rgb2gray
 from skimage.feature import canny
 from torch.utils.data import DataLoader
 
+
 def to_int(x):
     return tuple(map(int, x))
 
