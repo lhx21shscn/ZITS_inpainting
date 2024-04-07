@@ -5,19 +5,19 @@ from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from datasets.dataset_teacher import *
+from datasets.dataset_student import *
 from src.models.Teacher_model import *
 from .inpainting_metrics import get_inpainting_metrics
 from .utils import Progbar, create_dir, stitch_images, SampleEdgeLineLogits
 
 
-class LaMa_Teacher:
+class LaMa_Student:
     def __init__(self, config, gpu, rank, test=False):
         self.config = config
         self.device = gpu
         self.global_rank = rank
 
-        self.model_name = 'teacher'
+        self.model_name = 'student'
 
         kwargs = dict(config.training_model)
         kwargs.pop('kind')
@@ -220,12 +220,6 @@ class LaMa_Teacher:
             # inpaint model
             iteration = self.inpaint_model.iteration
             inputs = (items['image'] * (1 - items['mask']))
-            if self.config.Edge:
-                inputs_edge = items['edge'] * (1 - items['mask'])
-            if self.config.Line:
-                inputs_line = items['line'] * (1 - items['mask'])
-            if self.config.Seg:
-                inputs_seg = items['seg'] * (1 - items['mask'])
             items = self.inpaint_model(items)
             outputs_merged = (items['predicted_image'] * items['mask']) + (items['image'] * (1 - items['mask']))
 
@@ -236,37 +230,14 @@ class LaMa_Teacher:
         if self.config.SAMPLE_SIZE <= 6:
             image_per_row = 1
 
-        if self.config.Line:
-            images = stitch_images(
-                self.postprocess(items['image'].cpu()),
-                self.postprocess(inputs.cpu()),
-                self.postprocess(inputs_line.cpu()),
-                self.postprocess(items['mask'].cpu()),
-                self.postprocess(items['predicted_image'].cpu()),
-                self.postprocess(items['predicted_line'].cpu()),
-                self.postprocess(outputs_merged.cpu()),
-                img_per_row=image_per_row
-            )
-        elif self.config.Edge:
-            images = stitch_images(
-                self.postprocess(items['image'].cpu()),
-                self.postprocess(inputs.cpu()),
-                self.postprocess(inputs_edge.cpu()),
-                self.postprocess(items['mask'].cpu()),
-                self.postprocess(items['predicted_image'].cpu()),
-                self.postprocess(items['predicted_edge'].cpu()),
-                self.postprocess(outputs_merged.cpu()),
-                img_per_row=image_per_row
-            )
-        else:
-            images = stitch_images(
-                self.postprocess(items['image'].cpu()),
-                self.postprocess(inputs.cpu()),
-                self.postprocess(items['mask'].cpu()),
-                self.postprocess(items['predicted_image'].cpu()),
-                self.postprocess(outputs_merged.cpu()),
-                img_per_row=image_per_row
-            )
+        images = stitch_images(
+            self.postprocess(items['image'].cpu()),
+            self.postprocess(inputs.cpu()),
+            self.postprocess(items['mask'].cpu()),
+            self.postprocess(items['predicted_image'].cpu()),
+            self.postprocess(outputs_merged.cpu()),
+            img_per_row=image_per_row
+        )
 
         path = os.path.join(self.samples_path, self.model_name)
         name = os.path.join(path, str(iteration).zfill(5) + ".png")
