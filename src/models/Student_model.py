@@ -5,7 +5,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.losses.adversarial import NonSaturatingWithR1
 from src.losses.feature_matching import masked_l1_loss, feature_matching_loss
-from src.losses.perceptual import ResNetPL
+from src.losses.perceptual import ResNetPL, TeacherPL
 from src.models.LaMa import *
 from src.models.TSR_model import *
 from src.models.upsample import StructureUpsampling
@@ -43,11 +43,18 @@ class StudentBaseInpaintingTrainingModule(nn.Module):
         self.gen_weights_path = os.path.join(config.PATH, name + '_gen.pth')
         self.dis_weights_path = os.path.join(config.PATH, name + '_dis.pth')
 
+        self.generator = Student(in_channels=4).cuda(gpu)
         self.edge = config.Edge
         self.line = config.Line
         self.seg = config.Seg
-        self.generator = Teacher(config.Edge, config.Line, config.Seg, \
-                                 in_channels=config.generator["input_nc"]).cuda(gpu)
+        self.teacher = Teacher(config.Edge, config.Line, config.Seg, \
+                                 in_channels=5).cuda(gpu)
+        self.teacher.load_state_dict(torch.load(config.TEACHER_PATH)['generator'])
+        self.whiten = nn.LayerNorm(512)
+        set_requires_grad(self.whiten, False)
+        set_requires_grad(self.teacher, False)
+        self.teacher.eval()
+        self.whiten.eval()
         self.best = None
 
         if not test:
@@ -62,12 +69,21 @@ class StudentBaseInpaintingTrainingModule(nn.Module):
             if self.config.losses.get("mse", {"weight": 0})['weight'] > 0:
                 self.loss_mse = nn.MSELoss(reduction='none')
 
+            if self.config.losses.get("distill_loss", {"weight": 0})['weight'] > 0:
+                self.distill_loss = nn.SmoothL1Loss(reduction='mean')
+
             assert self.config.losses['perceptual']['weight'] == 0
 
             if self.config.losses.get("resnet_pl", {"weight": 0})['weight'] > 0:
                 self.loss_resnet_pl = ResNetPL(**self.config.losses['resnet_pl'])
             else:
                 self.loss_resnet_pl = None
+
+            if self.config.losses.get("teacher_pl", {"weight": 0})['weight'] > 0:
+                self.loss_teacher_pl = TeacherPL(**self.config.losses['teacher_pl'], config=config, gpu=gpu)
+            else:
+                self.loss_teacher_pl = None
+
             self.gen_optimizer, self.dis_optimizer = self.configure_optimizers()
         if self.config.AMP:  # use AMP
             self.scaler = torch.cuda.amp.GradScaler()
@@ -148,7 +164,7 @@ class StudentBaseInpaintingTrainingModule(nn.Module):
         ]
 
 
-class TeacherInpaintingTrainingModule(TeacherBaseInpaintingTrainingModule):
+class StudentInpaintingTrainingModule(StudentBaseInpaintingTrainingModule):
     def __init__(self, *args, gpu, rank, image_to_discriminator='predicted_image', test=False, **kwargs):
         super().__init__(*args, gpu=gpu, name='InpaintingModel', rank=rank, test=test, **kwargs)
         self.image_to_discriminator = image_to_discriminator
@@ -160,32 +176,10 @@ class TeacherInpaintingTrainingModule(TeacherBaseInpaintingTrainingModule):
         mask = batch['mask']
         masked_img = img * (1 - mask)
         input_data = [masked_img, mask]
-        if self.edge:
-            masked_edge = batch['edge'] * (1 - mask)
-            input_data.append(masked_edge)
-        if self.line:
-            masked_line = batch['line'] * (1 - mask)
-            input_data.append(masked_line)
-        if self.seg:
-            masked_seg = batch['seg'] * (1 - mask)
-            input_data.append(masked_seg)
         input_data = torch.cat(input_data, dim=1)
-        predicted_image, predicted_edge, predicted_line, predicted_seg, predicted_feat  = self.generator(input_data.to(torch.float32))
+        predicted_image, predicted_feat  = self.generator(input_data.to(torch.float32))
         batch['predicted_image'] = predicted_image
         batch['inpainted_image'] = mask * batch['predicted_image'] + (1 - mask) * batch['image']
-
-        if self.edge:
-            batch['predicted_edge'] = predicted_edge
-            batch['inpainted_edge'] = mask * batch['predicted_edge'] + (1 - mask) * batch['edge']
-
-        if self.line:
-            batch['predicted_line'] = predicted_line
-            batch['inpainted_line'] = mask * batch['predicted_line'] + (1 - mask) * batch['line']
-
-        if self.seg:
-            batch['predicted_seg'] = predicted_seg
-            batch['inpainted_seg'] = mask * batch['predicted_seg'] + (1 - mask) * batch['seg']
-
         batch['predicted_feat'] = predicted_feat
         batch['mask_for_losses'] = mask
         return batch
@@ -232,6 +226,25 @@ class TeacherInpaintingTrainingModule(TeacherBaseInpaintingTrainingModule):
         gen_loss = l1_value
         gen_metric = dict(gen_l1=l1_value.item())
 
+        # distill loss
+        if self.config.losses["distill_loss"]['weight'] > 0:
+            img = batch['image']
+            mask = torch.zeros_like(batch['mask'])
+            input_data = [img, mask]
+            if self.edge:
+                input_data.append(batch['edge'])
+            if self.line:
+                input_data.append(batch['line'])
+            if self.seg:
+                input_data.append(batch['seg'])
+            input_data = torch.cat(input_data, dim=1)
+            _, _, _, _, teacher_feat = self.teacher(input_data.to(torch.float32))
+            teacher_feat = self.whiten(teacher_feat)
+            print(teacher_feat.required_grad)
+            dloss = self.distill_loss(batch["predicted_feat"], teacher_feat) * self.config.losses["distill_loss"]['weight']
+            gen_loss = gen_loss + dloss
+            gen_metric['distill_loss'] = dloss.item()
+
         # vgg-based perceptual loss
         if self.config.losses['perceptual']['weight'] > 0:
             pl_value = self.loss_pl(predicted_img, img,
@@ -266,21 +279,18 @@ class TeacherInpaintingTrainingModule(TeacherBaseInpaintingTrainingModule):
             gen_loss = gen_loss + resnet_pl_value
             gen_metric['gen_resnet_pl'] = resnet_pl_value.item()
 
-        if self.edge:
-            edge_loss = F.binary_cross_entropy(batch["predicted_edge"].permute(0, 2, 3, 1).contiguous().view(-1, 1), \
-                                               batch["edge"].permute(0, 2, 3, 1).contiguous().view(-1, 1)) * self.config.losses['edge']['weight']
-            gen_loss = gen_loss + edge_loss
-            gen_metric["edge"] = edge_loss.item()
-
-        if self.line:
-            line_loss = F.binary_cross_entropy(batch["predicted_line"].permute(0, 2, 3, 1).contiguous().view(-1, 1), \
-                                               batch["line"].permute(0, 2, 3, 1).contiguous().view(-1, 1)) * self.config.losses['line']['weight']
-            gen_loss = gen_loss + line_loss
-            gen_metric["line"] = line_loss.item()
-
-        # TODO delete
-        if self.seg:
-            pass
+        if self.loss_teacher_pl is not None:
+            img = batch['image']
+            mask = torch.zeros_like(batch['mask'])
+            if self.edge:
+                pred = torch.cat((predicted_img, mask, batch['edge']))
+                target = torch.cat((img, mask, batch['edge']))
+            elif self.line:
+                pred = torch.cat((predicted_img, mask, batch['line']))
+                target = torch.cat((img, mask, batch['line']))
+            teacher_pl_value = self.loss_teacher_pl(pred, target)
+            gen_loss = gen_loss + teacher_pl_value
+            gen_metric['gen_teacher_pl'] = teacher_pl_value.item()
 
         if self.config.AMP:
             self.scaler.scale(gen_loss).backward()

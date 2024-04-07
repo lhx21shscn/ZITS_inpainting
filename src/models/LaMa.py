@@ -455,3 +455,75 @@ class Teacher(nn.Module):
         if self.line:
             line = self.line_decoder(x)
         return img, edge, line, seg, x
+
+
+class Student(nn.Module):
+    def __init__(self, in_channels=5):
+        super().__init__()
+
+        self.in_channels=in_channels
+
+        self.pad1 = nn.ReflectionPad2d(3)
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=64, kernel_size=7, padding=0)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.act = nn.ReLU(True)
+
+        self.conv2 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=2, padding=1)
+        self.bn2 = nn.BatchNorm2d(128)
+
+        self.conv3 = nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1)
+        self.bn3 = nn.BatchNorm2d(256)
+
+        self.conv4 = nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, stride=2, padding=1)
+        self.bn4 = nn.BatchNorm2d(512)
+
+        blocks = []
+        ### resnet blocks
+        for i in range(9):
+            cur_resblock = ResnetBlock_remove_IN(512, 1)
+            blocks.append(cur_resblock)
+
+        self.middle = nn.Sequential(*blocks)
+
+        self.trans = nn.Conv2d(512, 512, 1, 1, 0)
+
+        self.rgb_decoder = nn.Sequential(
+            nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(in_channels=64, out_channels=3, kernel_size=7, padding=0),
+            nn.Tanh()
+        )
+
+
+    def forward(self, x):
+        x = self.pad1(x)
+        x = self.conv1(x)
+        x = self.bn1(x.to(torch.float32))
+        x = self.act(x)
+
+        x = self.conv2(x)
+        x = self.bn2(x.to(torch.float32))
+        x = self.act(x)
+
+        x = self.conv3(x)
+        x = self.bn3(x.to(torch.float32))
+        x = self.act(x)
+
+        x = self.conv4(x)
+        x = self.bn4(x.to(torch.float32))
+        x = self.act(x)
+
+        x = self.middle(x)
+        trans_x = self.trans(x)
+
+        img = self.rgb_decoder(x.to(torch.float32))
+        img = (img + 1) / 2
+        return img, trans_x

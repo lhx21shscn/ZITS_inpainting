@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torchvision
 
 from ..models.ade20k import ModelBuilder
+from ..models.LaMa import Teacher
 
 
 def check_and_warn_input_range(tensor, min_value, max_value, name):
@@ -119,4 +120,26 @@ class ResNetPL(nn.Module):
         result = torch.stack([F.mse_loss(cur_pred, cur_target)
                               for cur_pred, cur_target
                               in zip(pred_feats, target_feats)]).sum() * self.weight
+        return result
+
+class TeacherPL(nn.Module):
+    def __init__(self, weight=1, weights_path=None, config=None, gpu=None, ):
+        super().__init__()
+        print('*'*10, weights_path)
+        self.config = config
+
+        self.impl = Teacher(config.Edge, config.Line, config.Seg, \
+                                 in_channels=5).cuda(gpu)
+        self.impl.load_state_dict(torch.load(weights_path)['generator'])
+        self.impl.eval()
+        for w in self.impl.parameters():
+            w.requires_grad_(False)
+
+        self.weight = weight
+
+    def forward(self, pred, target):
+        _, _, _, _, pred_feats = self.impl(pred)
+        _, _, _, _, target_feats = self.impl(target)
+
+        result = F.mse_loss(pred_feats, target_feats) * self.weight
         return result

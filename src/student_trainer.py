@@ -6,7 +6,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from datasets.dataset_student import *
-from src.models.Teacher_model import *
+from src.models.Student_model import *
 from .inpainting_metrics import get_inpainting_metrics
 from .utils import Progbar, create_dir, stitch_images, SampleEdgeLineLogits
 
@@ -22,7 +22,7 @@ class LaMa_Student:
         kwargs = dict(config.training_model)
         kwargs.pop('kind')
 
-        self.inpaint_model = TeacherInpaintingTrainingModule(config, gpu=gpu, rank=rank, test=test, **kwargs).to(gpu)
+        self.inpaint_model = StudentInpaintingTrainingModule(config, gpu=gpu, rank=rank, test=test, **kwargs).to(gpu)
 
         if config.min_sigma is None:
             min_sigma = 2.0
